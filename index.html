@@ -2499,11 +2499,13 @@ function handleMBFile(file, resultTarget) {
     // Find IMEI column and plan end date column
     const sample = rows[0] || {};
     const imeiCol = Object.keys(sample).find(k => /imei|serial.?number|serial.?num/i.test(k));
-    const dateCol = Object.keys(sample).find(k => /latest.*service.*plan.*end|plan.*end.*date|service.*end/i.test(k));
+    const dateCol = Object.keys(sample).find(k => /latest.*service.*plan.*end|plan.*end.*date|service.*end|expir|exp.*date|end.*date|renewal|service.*plan/i.test(k));
     const phoneCol = Object.keys(sample).find(k => /\bphone\b|msisdn|active.?ptn|\bptn\b/i.test(k));
 
     if (!imeiCol) { showResult(mbResultId, '❌ Could not find IMEI column.', 'error'); return; }
-    if (!dateCol) { showResult(mbResultId, '❌ Could not find "Latest Service Plan End Date" column.', 'error'); return; }
+    if (!dateCol) { showResult(mbResultId, '❌ Could not find expiration/plan end date column.', 'error'); return; }
+    console.log('MB Renewal columns detected:', 'IMEI=' + imeiCol, '| Date=' + dateCol, '| Phone=' + (phoneCol || 'none'));
+    console.log('MB Renewal all columns:', Object.keys(sample).join(', '));
 
     // Build IMEI → hotspot map
     const imeiMap = {};
@@ -2534,20 +2536,34 @@ function handleMBFile(file, resultTarget) {
         if (newExp !== oldExp) {
           changes.push(`c.${h.copy_num} (IMEI ${imei}) exp <span class="ch-old">${oldExp||'none'}</span> → <span class="ch-new">${newExp}</span>`);
           h.exp_date = newExp;
-          // Update sub_status based on new exp date
+          // Update sub_status based on new exp date — never read from description
+          // (description can lag; MB renewal report is authoritative for active status)
           const expDt = new Date(newExp);
-          if (/deactivated/i.test(h.description)) h.sub_status = 'Deactivated';
-          else if (/blocked/i.test(h.description)) h.sub_status = 'Blocked';
-          else h.sub_status = expDt < TODAY ? 'Expired' : 'Active';
+          if (h.mb_deactivated) {
+            // Stay deactivated — MB renewal report alone doesn't reactivate
+            h.sub_status = 'Deactivated';
+          } else {
+            h.sub_status = expDt < TODAY ? 'Expired' : 'Active';
+          }
           // Update phone if MB has it
           if (phoneCol && row[phoneCol]) {
             const ph = String(row[phoneCol]).trim();
             if (ph && ph !== h.phone) h.phone = ph;
           }
-          // If this device was awaiting renewal, the new exp date confirms it's done
-          if (h.sent_for_renewal) {
+          // If this device was awaiting renewal, only clear the flag if new exp date is in the future
+          const newExpIsFuture = (() => {
+            try {
+              const _p = newExp.split('-');
+              return new Date(parseInt(_p[0]), parseInt(_p[1])-1, parseInt(_p[2])) >= TODAY;
+            } catch { return false; }
+          })();
+          if (h.sent_for_renewal && newExpIsFuture) {
             h.sent_for_renewal = false;
             h.renewal_sent_date = null;
+            changes.push(`c.${h.copy_num} — removed from <span class="ch-old">Sent for Renewal</span> (exp date confirmed updated to ${newExp})`);
+          }
+          if (h.pending_renewal && newExpIsFuture) {
+            h.pending_renewal = false;
           }
           h.last_mb_updated = true; // flag for Alma export
           recalcTabs(h);
@@ -2869,9 +2885,19 @@ function handleMBActiveFile(file, resultTarget) {
     const imeiCol = Object.keys(sample).find(k => /imei|serial.?number|serial.?num/i.test(k));
     if (!imeiCol) { showResult(mbResultId, '❌ Could not find IMEI or Serial Number column in this file.', 'error'); return; }
 
-    // Find optional columns
-    const dateCol = Object.keys(sample).find(k => /latest.*service.*plan.*end|plan.*end.*date|service.*end/i.test(k));
+    // Find optional columns — permissive matching to handle MB column name variations
+    const dateCol = Object.keys(sample).find(k =>
+      /latest.*service.*plan.*end|plan.*end.*date|service.*end|expir|exp.*date|end.*date|renewal|service.*plan/i.test(k)
+    );
     const phoneCol = Object.keys(sample).find(k => /\bphone\b|msisdn|active.?ptn|\bptn\b/i.test(k));
+
+    // Log detected columns so we can verify in console
+    console.log('MB Active List columns detected:',
+      'IMEI=' + imeiCol,
+      '| Date=' + (dateCol || 'NOT FOUND — exp dates will NOT update'),
+      '| Phone=' + (phoneCol || 'none')
+    );
+    console.log('MB Active List all columns:', Object.keys(sample).join(', '));
 
     // Build set of active IMEIs from MB list
     const activeIMEIs = new Set();
@@ -2906,7 +2932,7 @@ function handleMBActiveFile(file, resultTarget) {
         const mbRow = mbRowByIMEI[imei];
         let changed = false;
 
-        // Update exp_date from MB file
+        // Update exp_date from MB file — always overwrite, MB is sole source of truth
         if (dateCol && mbRow) {
           let newExp = '';
           try {
@@ -2937,9 +2963,6 @@ function handleMBActiveFile(file, resultTarget) {
 
         // Device is confirmed active by MB — always set sub_status correctly.
         // Never use getSubStatus() or description parsing here.
-        // MB is the sole source of truth: if it's on the active list, it's Active
-        // (unless the exp_date is in the past, in which case it's Expired).
-        const wasDeact = h.mb_deactivated || h.sub_status === 'Deactivated' || h.sub_status === 'Blocked';
         let correctSub = 'Active';
         if (h.exp_date) {
           try {
@@ -2952,14 +2975,42 @@ function handleMBActiveFile(file, resultTarget) {
           h.sub_status = correctSub;
           changed = true;
         }
+
+        // Clear MB-deactivated flag if it was previously deactivated
         if (h.mb_deactivated) {
           h.mb_deactivated = false;
           changes.push(`c.${h.copy_num} — <span class="ch-new">RESTORED</span> (found on MB active list)`);
           changed = true;
         }
+
+        // Clear sent_for_renewal / pending_renewal ONLY if:
+        // - The exp date actually changed (renewal was confirmed), AND
+        // - The new exp date is in the future (not still expired)
+        // If exp date didn't change or is still past, keep the flags — renewal not confirmed yet.
+        const expDateChanged = changed && h.exp_date; // changed=true means exp_date was just updated
+        const newExpIsFuture = h.exp_date ? (() => {
+          try {
+            const _p = h.exp_date.split('-');
+            return new Date(parseInt(_p[0]), parseInt(_p[1])-1, parseInt(_p[2])) >= TODAY;
+          } catch { return false; }
+        })() : false;
+
+        if (h.sent_for_renewal && expDateChanged && newExpIsFuture) {
+          h.sent_for_renewal = false;
+          changes.push(`c.${h.copy_num} — removed from <span class="ch-old">Sent for Renewal</span> (exp date confirmed updated to ${h.exp_date})`);
+          changed = true;
+        }
+        if (h.pending_renewal && expDateChanged && newExpIsFuture) {
+          h.pending_renewal = false;
+          changed = true;
+        }
+
         h.on_mb_active = true;
 
-        if (changed) { recalcTabs(h); updated++; }
+        // Always recalcTabs for every matched device — even if nothing else changed,
+        // being on the active list may affect routing (e.g. was on to_be_reactivated)
+        recalcTabs(h);
+        if (changed) updated++;
 
       } else {
         // Device is NOT on MB active list — mark as deactivated
@@ -3006,10 +3057,11 @@ function handleMBActiveFile(file, resultTarget) {
     recordUpload('MB Active List (Reconciliation)', buildMBAChangeEvents(changes, deactivated, updated));
     updateBadges();
 
+    const noDateWarn = dateCol ? '' : '<br>⚠️ <strong>No expiration date column found</strong> — exp dates were NOT updated. Check that your MB file has a date column.';
     const summary = `✅ MB Active List processed — ${activeIMEIs.size} active IMEIs found.<br>
       <strong>${deactivated}</strong> hotspots marked Deactivated (not on MB list) &nbsp;·&nbsp;
       <strong>${updated}</strong> records updated (exp date / phone) &nbsp;·&nbsp;
-      <strong>${skipped}</strong> skipped (no IMEI on record)`;
+      <strong>${skipped}</strong> skipped (no IMEI on record)${noDateWarn}`;
     showResult(mbResultId, summary, deactivated > 0 ? 'info' : 'success');
     _doSave();
     notify(`MB reconciliation complete: ${deactivated} deactivated, ${updated} updated`, deactivated > 0 ? 'info' : 'success');

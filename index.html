@@ -796,8 +796,9 @@ const STATUS_TABS = [
   { id: 'active_loans',       label: 'Active Loans',        color: 'blue',   icon: '↗' },
   { id: 'overdue',            label: 'Overdue',              color: 'yellow', icon: '⚠' },
   { id: 'lost_missing',       label: 'Lost / Missing',       color: 'red',    icon: '✕' },
-  { id: 'sent_for_renewal',   label: 'Sent for Renewal',     color: 'teal',   icon: '↻' },
-  { id: 'archived',           label: 'Archived',             color: 'orange', icon: '⊘' },
+  { id: 'sent_for_renewal',      label: 'Sent for Renewal',     color: 'teal',   icon: '↻' },
+  { id: 'awaiting_replacement',  label: 'Awaiting Replacement', color: 'orange', icon: '⚙' },
+  { id: 'archived',              label: 'Archived',             color: 'orange', icon: '⊘' },
 ];
 const SUGGEST_TABS = [
   { id: 'to_be_reactivated', label: 'To Be Reactivated', color: 'purple', icon: '⟳' },
@@ -839,7 +840,8 @@ let state = {
 // HELPERS
 // ============================================================
 function getTabData(tabId) {
-  if (tabId === 'sent_for_renewal') return state.hotspots.filter(h => h.sent_for_renewal);
+  if (tabId === 'sent_for_renewal')     return state.hotspots.filter(h => h.sent_for_renewal);
+  if (tabId === 'awaiting_replacement') return state.hotspots.filter(h => h.awaiting_replacement);
   return state.hotspots.filter(h => h.tabs.includes(tabId));
 }
 
@@ -1143,16 +1145,31 @@ function buildTable(data, tabId) {
   else if (tabId === 'sent_for_renewal') cols = [
     ['copy_num','Copy #'],['device_type','Type'],['barcode','Barcode'],['imei','IMEI'],['phone','Phone'],['library','Library'],['exp_date','Current Exp'],['sub_status','Sub Status'],['renewal_sent_date','Sent Date'],['process_type','Process']
   ];
+  else if (tabId === 'awaiting_replacement') cols = [
+    ['copy_num','Copy #'],['device_type','Type'],['barcode','Barcode'],['imei','IMEI'],['phone','Phone'],['library','Library'],['exp_date','Sub Expires'],['sub_status','Sub Status'],['process_type','Process']
+  ];
   else cols = [
     ['copy_num','Copy #'],['device_type','Type'],['barcode','Barcode'],['imei','IMEI'],['library','Library'],['lis_status','Status'],['process_type','Process'],['exp_date','Exp Date'],['sub_status','Sub']
   ];
 
-  let html = `<div class="table-wrap"><table><thead><tr>`;
+  const tableId = 'tbl-' + tabId + '-' + Date.now();
+  let html = `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px" id="bulk-bar-${tabId}" style="display:none">
+    <label style="font-size:11px;font-family:DM Mono,monospace;color:var(--text2);display:flex;align-items:center;gap:6px;cursor:pointer">
+      <input type="checkbox" id="sel-all-${tabId}" onchange="toggleSelectAll('${tabId}', this.checked)" style="cursor:pointer"> Select all
+    </label>
+    <span id="sel-count-${tabId}" style="font-size:11px;font-family:DM Mono,monospace;color:var(--text3)"></span>
+    <button class="export-btn" style="color:var(--teal);border-color:var(--teal);display:none" id="bulk-sent-btn-${tabId}"
+      onclick="markSelectedAsSent('${tabId}')">↻ Mark selected as Sent for Renewal</button>
+    <button class="export-btn" id="bulk-export-btn-${tabId}" style="display:none"
+      onclick="exportSelected('${tabId}')">⬇ Export selected (CSV)</button>
+  </div>`;
+  html += `<div class="table-wrap"><table id="${tableId}"><thead><tr><th style="width:28px;padding:6px 4px"></th>`;
   cols.forEach(([col,label]) => { html += th(col, label); });
   html += `</tr></thead><tbody>`;
 
   data.forEach(h => {
-    html += `<tr class="clickable" onclick="showDetail('${h.barcode}')">`; 
+    html += `<tr class="clickable" data-barcode="${h.barcode}" onclick="handleRowClick(event,'${h.barcode}','${tabId}')">`;
+    html += `<td style="padding:6px 4px;text-align:center" onclick="event.stopPropagation()"><input type="checkbox" class="row-sel-${tabId}" data-barcode="${h.barcode}" onchange="onRowSelect('${tabId}')" style="cursor:pointer"></td>`;
     cols.forEach(([col]) => {
       if (col === 'copy_num') html += `<td class="td-main">c. ${h.copy_num ?? '?'}</td>`;
       else if (col === 'device_type') html += `<td><span class="badge ${h.device_type==='T10'?'badge-blue':'badge-purple'}">${h.device_type}</span>${h.program ? ' <span class="badge badge-yellow">'+h.program+'</span>' : ''}</td>`;
@@ -1470,6 +1487,16 @@ function renderDashboard() {
     </div>`;
   }
 
+  if (activeTab === 'to_be_reactivated') {
+    const notYetSent = tabData.filter(h => !h.sent_for_renewal).length;
+    if (notYetSent > 0) {
+      html += `<div style="margin-bottom:12px">
+        <button class="export-btn" style="color:var(--teal);border-color:var(--teal)"
+          onclick="markAllReactivateAsSent()">⟳ Mark all ${notYetSent} as Sent for Renewal</button>
+      </div>`;
+    }
+  }
+
   if (activeTab === 'upcoming_renewals') {
     const within30 = tabData.filter(h=>{ const d=daysUntil(h.exp_date); return d!==null&&d<=30; }).length;
     const within90 = tabData.filter(h=>{ const d=daysUntil(h.exp_date); return d!==null&&d>30&&d<=90; }).length;
@@ -1497,6 +1524,8 @@ function exportCurrentTab(tabId) {
   let data;
   if (tabId === 'sent_for_renewal') {
     data = state.hotspots.filter(h => h.sent_for_renewal);
+  } else if (tabId === 'awaiting_replacement') {
+    data = state.hotspots.filter(h => h.awaiting_replacement);
   } else {
     data = state.hotspots.filter(h => h.tabs && h.tabs.includes(tabId));
   }
@@ -1506,7 +1535,7 @@ function exportCurrentTab(tabId) {
     in_stock:'In Stock', active_loans:'Active Loans', overdue:'Overdue',
     lost_missing:'Lost-Missing', archived:'Archived', sent_for_renewal:'Sent for Renewal',
     upcoming_renewals:'Upcoming Renewals', to_be_reactivated:'To Be Reactivated',
-    to_deactivate:'To Deactivate', mb_active_subs:'MB Active Subs',
+    to_deactivate:'To Deactivate', awaiting_replacement:'Awaiting Replacement', mb_active_subs:'MB Active Subs',
   };
   const label = TAB_LABELS[tabId] || tabId;
 
@@ -1525,6 +1554,75 @@ function exportCurrentTab(tabId) {
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
   const today = new Date().toISOString().split('T')[0];
   a.download = 'hotspots_' + label.replace(/[^a-z0-9]/gi,'_').toLowerCase() + '_' + today + '.csv';
+  a.click();
+  notify(data.length + ' devices exported as CSV', 'success');
+}
+
+function handleRowClick(event, barcode, tabId) {
+  // If click was on or near the checkbox cell, don't open detail
+  if (event.target.type === 'checkbox') return;
+  showDetail(barcode);
+}
+
+function toggleSelectAll(tabId, checked) {
+  document.querySelectorAll('.row-sel-' + tabId).forEach(cb => { cb.checked = checked; });
+  onRowSelect(tabId);
+}
+
+function onRowSelect(tabId) {
+  const selected = document.querySelectorAll('.row-sel-' + tabId + ':checked');
+  const total    = document.querySelectorAll('.row-sel-' + tabId);
+  const countEl  = document.getElementById('sel-count-' + tabId);
+  const sentBtn  = document.getElementById('bulk-sent-btn-' + tabId);
+  const expBtn   = document.getElementById('bulk-export-btn-' + tabId);
+  const selAll   = document.getElementById('sel-all-' + tabId);
+  if (countEl) countEl.textContent = selected.length ? selected.length + ' selected' : '';
+  if (sentBtn)  sentBtn.style.display  = selected.length ? '' : 'none';
+  if (expBtn)   expBtn.style.display   = selected.length ? '' : 'none';
+  if (selAll)   selAll.indeterminate   = selected.length > 0 && selected.length < total.length;
+}
+
+function markSelectedAsSent(tabId) {
+  const barcodes = Array.from(document.querySelectorAll('.row-sel-' + tabId + ':checked')).map(cb => cb.dataset.barcode);
+  if (!barcodes.length) { notify('No devices selected', 'info'); return; }
+  const devices = barcodes.map(b => state.hotspots.find(h => h.barcode === b)).filter(Boolean).filter(h => !h.sent_for_renewal);
+  if (!devices.length) { notify('All selected devices are already marked as Sent for Renewal', 'info'); return; }
+  if (!confirm('Mark ' + devices.length + ' selected device(s) as Sent for Renewal?')) return;
+  const today = new Date().toLocaleDateString();
+  const events = [];
+  takeSnapshot();
+  devices.forEach(h => {
+    h.sent_for_renewal = true;
+    h.renewal_sent_date = today;
+    recalcTabs(h);
+    events.push({ type: 'sent_for_renewal', copy_num: h.copy_num, barcode: h.barcode||'',
+      device_type: h.device_type, library: h.library,
+      desc: 'Sent to Mobile Beacon for renewal (selected)', detail: 'Exp: ' + (h.exp_date||'—') });
+  });
+  recordUpload('Sent for Renewal (Selected)', events);
+  _doSave();
+  updateBadges();
+  notify(devices.length + ' devices marked as Sent for Renewal', 'success');
+  renderCurrentView();
+}
+
+function exportSelected(tabId) {
+  const barcodes = Array.from(document.querySelectorAll('.row-sel-' + tabId + ':checked')).map(cb => cb.dataset.barcode);
+  if (!barcodes.length) { notify('No devices selected', 'info'); return; }
+  const data = barcodes.map(b => state.hotspots.find(h => h.barcode === b)).filter(Boolean);
+  const cols = ['copy_num','barcode','imei','phone','device_type','program','library',
+                'lis_status','process_type','due_date','sub_status','exp_date','days_overdue','description'];
+  let csv = cols.join(',') + '\n';
+  data.sort((a,b) => (a.copy_num||0)-(b.copy_num||0)).forEach(h => {
+    csv += cols.map(c => {
+      const v = h[c] == null ? '' : String(h[c]);
+      return v.includes(',') || v.includes('"') ? '"' + v.replace(/"/g,'""') + '"' : v;
+    }).join(',') + '\n';
+  });
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  const today = new Date().toISOString().split('T')[0];
+  a.download = 'hotspots_selected_' + tabId + '_' + today + '.csv';
   a.click();
   notify(data.length + ' devices exported as CSV', 'success');
 }
@@ -2845,6 +2943,27 @@ function markAllUpcomingAsSent() {
   notify(upcoming.length + ' devices marked as Sent for Renewal', 'success');
 }
 
+function markAllReactivateAsSent() {
+  const devices = state.hotspots.filter(h => h.tabs && h.tabs.includes('to_be_reactivated') && !h.sent_for_renewal);
+  if (!devices.length) { notify('All to-reactivate devices are already marked as sent', 'info'); return; }
+  if (!confirm('Mark all ' + devices.length + ' to-reactivate devices as Sent for Renewal?\n\nThis flags them as pending and moves them to the Sent for Renewal tab.')) return;
+  const today = new Date().toLocaleDateString();
+  const events = [];
+  devices.forEach(h => {
+    h.sent_for_renewal  = true;
+    h.renewal_sent_date = today;
+    recalcTabs(h);
+    events.push({ type: 'sent_for_renewal', copy_num: h.copy_num, barcode: h.barcode||'',
+      device_type: h.device_type, library: h.library,
+      desc: 'Sent to Mobile Beacon for renewal (from To Reactivate)', detail: 'Exp: ' + (h.exp_date||'—') });
+  });
+  takeSnapshot();
+  recordUpload('Sent for Renewal (To Reactivate Bulk)', events);
+  _doSave();
+  updateBadges();
+  notify(devices.length + ' devices marked as Sent for Renewal', 'success');
+}
+
 function clearRenewalList() {
   const count = state.hotspots.filter(h => h.sent_for_renewal).length;
   if (!count) { notify('No devices currently marked Sent for Renewal', 'info'); return; }
@@ -3760,8 +3879,9 @@ const TAB_BADGE_STYLES = {
   overdue:           { label: 'Overdue',              bg: 'var(--yellow-bg)', color: 'var(--yellow)', tab: 'overdue' },
   lost_missing:      { label: 'Lost / Missing',       bg: 'var(--red-bg)',    color: 'var(--red)',    tab: 'lost_missing' },
   archived:          { label: 'Archived',             bg: 'var(--orange-bg)', color: 'var(--orange)', tab: 'archived' },
-  sent_for_renewal:  { label: 'Sent for Renewal',     bg: 'var(--teal-bg)',   color: 'var(--teal)',   tab: 'sent_for_renewal' },
-  to_be_reactivated: { label: 'To Be Reactivated',    bg: 'var(--purple-bg)', color: 'var(--purple)', tab: 'to_be_reactivated' },
+  sent_for_renewal:      { label: 'Sent for Renewal',     bg: 'var(--teal-bg)',   color: 'var(--teal)',   tab: 'sent_for_renewal' },
+  awaiting_replacement:  { label: 'Awaiting Replacement', bg: 'var(--orange-bg)', color: 'var(--orange)', tab: 'awaiting_replacement' },
+  to_be_reactivated:     { label: 'To Be Reactivated',    bg: 'var(--purple-bg)', color: 'var(--purple)', tab: 'to_be_reactivated' },
   to_deactivate:     { label: 'To Deactivate',        bg: 'var(--red-bg)',    color: 'var(--red)',    tab: 'to_deactivate' },
   upcoming_renewals: { label: 'Upcoming Renewals',    bg: 'var(--yellow-bg)', color: 'var(--yellow)', tab: 'upcoming_renewals' },
 };
@@ -3780,9 +3900,13 @@ function forceDeactivate(barcode) {
   notify('c.' + h.copy_num + ' marked as Deactivated', 'success');
 }
 
+// Track the currently-open detail modal's barcode for override wiring
+let currentDetailBarcode = null;
+
 function showDetail(barcode) {
   const h = state.hotspots.find(x => x.barcode === barcode);
   if (!h) return;
+  currentDetailBarcode = barcode;
 
   const typeColor = h.device_type === 'T10' ? 'var(--accent)' : 'var(--purple)';
   const lists = [];
@@ -3791,8 +3915,9 @@ function showDetail(barcode) {
   (h.tabs || []).forEach(tabId => {
     if (TAB_BADGE_STYLES[tabId]) lists.push(tabId);
   });
-  // Also check sent_for_renewal (not in tabs array)
-  if (h.sent_for_renewal) lists.push('sent_for_renewal');
+  // Also check sent_for_renewal and awaiting_replacement (not in tabs array)
+  if (h.sent_for_renewal)     lists.push('sent_for_renewal');
+  if (h.awaiting_replacement) lists.push('awaiting_replacement');
 
   const listBadges = lists.length
     ? lists.map(tabId => {
@@ -3829,7 +3954,7 @@ function showDetail(barcode) {
     </div>`).join('');
 
   // Build override options — tabs this device could be added to or removed from
-  const removableTabs = lists.filter(t => !['sent_for_renewal'].includes(t));
+  const removableTabs = lists.filter(t => !['sent_for_renewal', 'awaiting_replacement'].includes(t));
   const addableTabs   = ALL_TABS.filter(t => !lists.includes(t.id)).map(t => t.id);
 
   const removeOptions = removableTabs.map(t => {
@@ -3889,6 +4014,17 @@ function showDetail(barcode) {
         <button class="override-btn" id="override-apply-btn">Apply</button>
         <button class="override-btn" onclick="applyManualOverride('${h.barcode}','recalc',null)" title="Reset to computed state">↺ Reset</button>
       </div>
+      <div style="font-size:10px;color:var(--text3);font-family:DM Mono,monospace;margin:12px 0 6px">Quick Actions</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        ${h.sent_for_renewal
+          ? `<button class="override-btn" style="border-color:var(--teal);color:var(--teal)" onclick="quickToggleSentForRenewal('${h.barcode}')">✕ Remove from Sent for Renewal</button>`
+          : `<button class="override-btn" style="border-color:var(--teal);color:var(--teal)" onclick="quickToggleSentForRenewal('${h.barcode}')">↻ Mark as Sent for Renewal</button>`
+        }
+        ${h.awaiting_replacement
+          ? `<button class="override-btn" style="border-color:var(--orange);color:var(--orange)" onclick="quickToggleAwaitingReplacement('${h.barcode}')">✕ Remove from Awaiting Replacement</button>`
+          : `<button class="override-btn" style="border-color:var(--orange);color:var(--orange)" onclick="quickToggleAwaitingReplacement('${h.barcode}')">⚙ Mark as Awaiting Replacement</button>`
+        }
+      </div>
       <div class="override-note">List overrides are analyzed by AI to improve future categorization.</div>
       <div class="override-ai-result" id="override-ai-result" style="display:none"></div>
       ${state.overrideRules && state.overrideRules.length ? `
@@ -3908,7 +4044,7 @@ function showDetail(barcode) {
         const v = sel2.value;
         if (!v) { notify('Select a list action first', 'error'); return; }
         const isRemove = v.startsWith('remove:');
-        applyManualOverride('${h.barcode}', isRemove ? 'remove' : 'add', isRemove ? v.slice(7) : v);
+        applyManualOverride(currentDetailBarcode, isRemove ? 'remove' : 'add', isRemove ? v.slice(7) : v);
       };
     }
     // Wire IMEI save button
@@ -4002,6 +4138,42 @@ function closeDetail() {
   document.getElementById('detail-overlay').classList.add('hidden');
 }
 
+function quickToggleSentForRenewal(barcode) {
+  const h = state.hotspots.find(x => x.barcode === barcode);
+  if (!h) return;
+  takeSnapshot();
+  if (h.sent_for_renewal) {
+    h.sent_for_renewal = false;
+    h.renewal_sent_date = null;
+    notify('c.' + h.copy_num + ' removed from Sent for Renewal', 'info');
+  } else {
+    h.sent_for_renewal = true;
+    const _tn = new Date();
+    h.renewal_sent_date = _tn.getFullYear()+'-'+String(_tn.getMonth()+1).padStart(2,'0')+'-'+String(_tn.getDate()).padStart(2,'0');
+    notify('c.' + h.copy_num + ' marked as Sent for Renewal', 'success');
+  }
+  recalcTabs(h);
+  saveState();
+  updateBadges();
+  showDetail(barcode);
+}
+
+function quickToggleAwaitingReplacement(barcode) {
+  const h = state.hotspots.find(x => x.barcode === barcode);
+  if (!h) return;
+  takeSnapshot();
+  if (h.awaiting_replacement) {
+    h.awaiting_replacement = false;
+    notify('c.' + h.copy_num + ' removed from Awaiting Replacement', 'info');
+  } else {
+    h.awaiting_replacement = true;
+    notify('c.' + h.copy_num + ' marked as Awaiting Replacement', 'success');
+  }
+  saveState();
+  updateBadges();
+  showDetail(barcode);
+}
+
 // ============================================================
 // MANUAL OVERRIDE SYSTEM
 // ============================================================
@@ -4009,15 +4181,16 @@ function closeDetail() {
 if (!state.overrideRules) state.overrideRules = [];
 
 const ALL_TABS = [
-  { id: 'in_stock',          label: 'In Stock' },
-  { id: 'active_loans',      label: 'Active Loans' },
-  { id: 'overdue',           label: 'Overdue' },
-  { id: 'lost_missing',      label: 'Lost / Missing' },
-  { id: 'archived',          label: 'Archived' },
-  { id: 'sent_for_renewal',  label: 'Sent for Renewal' },
-  { id: 'to_deactivate',     label: 'To Deactivate' },
-  { id: 'to_be_reactivated', label: 'To Reactivate' },
-  { id: 'upcoming_renewals', label: 'Upcoming Renewals' },
+  { id: 'in_stock',             label: 'In Stock' },
+  { id: 'active_loans',         label: 'Active Loans' },
+  { id: 'overdue',              label: 'Overdue' },
+  { id: 'lost_missing',         label: 'Lost / Missing' },
+  { id: 'archived',             label: 'Archived' },
+  { id: 'sent_for_renewal',     label: 'Sent for Renewal' },
+  { id: 'awaiting_replacement', label: 'Awaiting Replacement' },
+  { id: 'to_deactivate',        label: 'To Deactivate' },
+  { id: 'to_be_reactivated',    label: 'To Reactivate' },
+  { id: 'upcoming_renewals',    label: 'Upcoming Renewals' },
 ];
 
 function updateHotspotBarcode(oldBarcode, newBarcode) {
